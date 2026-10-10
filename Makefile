@@ -23,35 +23,21 @@ PACKAGE    = sg48
 PCF_FILE   = $(SYNTH_DIR)/icebreaker.pcf
 FREQ       = 12
 
-# Cocotb settings
-export COCOTB_REDUCED_LOG_FMT = 1
-SIM        ?= icarus
-TOPLEVEL   ?= riscv_core
-MODULE     ?= test_riscv
-
 #-------------------------------------------------------------------------------
-# Simulation
+# Simulation (cocotb + Icarus Verilog)
 #-------------------------------------------------------------------------------
-.PHONY: sim
+.PHONY: sim sim-fwd sim-top
+# Full suite on the forwarding and interlock-only builds + CPI comparison
 sim:
-	@mkdir -p $(BUILD_DIR)
-	cd $(BUILD_DIR) && \
-	iverilog -g2012 -o sim.vvp -s $(TOPLEVEL) \
-		$(addprefix ../,$(RTL_DIR)/riscv_core.sv $(RTL_DIR)/memory.sv) && \
-	MODULE=$(MODULE) TOPLEVEL=$(TOPLEVEL) TOPLEVEL_LANG=verilog \
-	vvp -M $$(cocotb-config --lib-dir) \
-		-m $$(cocotb-config --lib-name vpi icarus) sim.vvp
+	python3 $(TEST_DIR)/run_tests.py
 
-.PHONY: sim-gui
-sim-gui:
-	@mkdir -p $(BUILD_DIR)
-	cd $(BUILD_DIR) && \
-	iverilog -g2012 -o sim.vvp -s $(TOPLEVEL) \
-		$(addprefix ../,$(RTL_DIR)/riscv_core.sv $(RTL_DIR)/memory.sv) && \
-	MODULE=$(MODULE) TOPLEVEL=$(TOPLEVEL) TOPLEVEL_LANG=verilog \
-	WAVES=1 vvp -M $$(cocotb-config --lib-dir) \
-		-m $$(cocotb-config --lib-name vpi icarus) sim.vvp && \
-	gtkwave dump.vcd
+# Forwarding build only (faster)
+sim-fwd:
+	python3 $(TEST_DIR)/run_tests.py --forwarding 1
+
+# Full system: riscv_top over UART, driven by scripts/test_fpga.py (slow)
+sim-top:
+	python3 $(TEST_DIR)/run_tests.py --top
 
 #-------------------------------------------------------------------------------
 # Synthesis (Yosys + nextpnr for iCE40)
@@ -111,10 +97,10 @@ lint:
 #-------------------------------------------------------------------------------
 .PHONY: clean
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -rf $(BUILD_DIR)/sim_* $(BUILD_DIR)/cpi_*.json
 	rm -f *.vcd *.fst
 	rm -rf __pycache__ $(TEST_DIR)/__pycache__
-	rm -rf sim_build results.xml
+	rm -rf sim_build results.xml $(TEST_DIR)/results.xml
 
 .PHONY: clean-all
 clean-all: clean
@@ -128,8 +114,9 @@ help:
 	@echo "RISC-V 5-Stage Pipelined Processor"
 	@echo ""
 	@echo "Simulation:"
-	@echo "  make sim              - Run cocotb simulation"
-	@echo "  make sim-gui          - Run simulation with waveform viewer"
+	@echo "  make sim              - Run cocotb suite (forwarding + interlock builds, CPI table)"
+	@echo "  make sim-fwd          - Run cocotb suite on the forwarding build only"
+	@echo "  make sim-top          - Run scripts/test_fpga.py against the simulated FPGA"
 	@echo ""
 	@echo "Synthesis:"
 	@echo "  make build            - Build bitstream for iCEBreaker"

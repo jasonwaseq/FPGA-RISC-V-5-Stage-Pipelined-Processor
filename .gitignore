@@ -1,0 +1,7 @@
+# Simulation outputs
+build/sim_*/
+build/cpi_*.json
+results.xml
+*.vcd
+*.fst
+__pycache__/

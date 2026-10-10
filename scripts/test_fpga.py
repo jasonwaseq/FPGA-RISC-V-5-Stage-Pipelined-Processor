@@ -12,20 +12,25 @@ UART Protocol Commands:
   0xCC                                         : Run processor
   0xDD                                         : Halt processor
   0xEE                                         : Reset processor (clears registers)
+  0xBC <idx>                                   : Read counter (0 cycles, 1 instret, 2 halted)
 
-Supported RV32I Instructions:
-  - ADDI, SLTI, SLTIU, XORI, ORI, ANDI, SLLI, SRLI, SRAI (I-type ALU)
-  - ADD, SUB, SLL, SLT, SLTU, XOR, SRL, SRA, OR, AND (R-type ALU)
-  - LW, SW (Load/Store - basic support)
-  - NOP (pseudo-instruction)
+The core implements the full RV32I base ISA (EBREAK/ECALL stop the core).
+Hardware tests run programs with no NOP padding and compare every register
+against the instruction-set reference model in test/rv32i.py.
 """
 
 import serial
 import serial.tools.list_ports
 import time
 import argparse
+import os
+import random
 import sys
 import re
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'test'))
+import rv32i                      # noqa: E402  shared encoders + reference model
+from programs import BENCHMARKS   # noqa: E402
 
 # =============================================================================
 # RV32I Instruction Encoding
@@ -151,6 +156,23 @@ INSTR_MAP = {
     'lw': lambda args: LW(parse_reg(args[0]), parse_reg(args[1]), parse_imm(args[2]) if len(args) > 2 else 0),
     'sw': lambda args: SW(parse_reg(args[0]), parse_reg(args[1]), parse_imm(args[2]) if len(args) > 2 else 0),
     'nop': lambda args: NOP(),
+    'ebreak': lambda args: rv32i.EBREAK(),
+    'lui': lambda args: rv32i.LUI(parse_reg(args[0]), parse_imm(args[1])),
+    'auipc': lambda args: rv32i.AUIPC(parse_reg(args[0]), parse_imm(args[1])),
+    'jal': lambda args: rv32i.JAL(parse_reg(args[0]), parse_imm(args[1])),
+    'jalr': lambda args: rv32i.JALR(parse_reg(args[0]), parse_reg(args[1]), parse_imm(args[2]) if len(args) > 2 else 0),
+    'beq': lambda args: rv32i.BEQ(parse_reg(args[0]), parse_reg(args[1]), parse_imm(args[2])),
+    'bne': lambda args: rv32i.BNE(parse_reg(args[0]), parse_reg(args[1]), parse_imm(args[2])),
+    'blt': lambda args: rv32i.BLT(parse_reg(args[0]), parse_reg(args[1]), parse_imm(args[2])),
+    'bge': lambda args: rv32i.BGE(parse_reg(args[0]), parse_reg(args[1]), parse_imm(args[2])),
+    'bltu': lambda args: rv32i.BLTU(parse_reg(args[0]), parse_reg(args[1]), parse_imm(args[2])),
+    'bgeu': lambda args: rv32i.BGEU(parse_reg(args[0]), parse_reg(args[1]), parse_imm(args[2])),
+    'lb': lambda args: rv32i.LB(parse_reg(args[0]), parse_reg(args[1]), parse_imm(args[2]) if len(args) > 2 else 0),
+    'lh': lambda args: rv32i.LH(parse_reg(args[0]), parse_reg(args[1]), parse_imm(args[2]) if len(args) > 2 else 0),
+    'lbu': lambda args: rv32i.LBU(parse_reg(args[0]), parse_reg(args[1]), parse_imm(args[2]) if len(args) > 2 else 0),
+    'lhu': lambda args: rv32i.LHU(parse_reg(args[0]), parse_reg(args[1]), parse_imm(args[2]) if len(args) > 2 else 0),
+    'sb': lambda args: rv32i.SB(parse_reg(args[0]), parse_reg(args[1]), parse_imm(args[2]) if len(args) > 2 else 0),
+    'sh': lambda args: rv32i.SH(parse_reg(args[0]), parse_reg(args[1]), parse_imm(args[2]) if len(args) > 2 else 0),
     'li': lambda args: LI(parse_reg(args[0]), parse_imm(args[1])),
     'mv': lambda args: MV(parse_reg(args[0]), parse_reg(args[1])),
 }
@@ -217,8 +239,10 @@ def disassemble_instruction(instr):
             imm_s |= 0xFFFFF000
             imm_s = imm_s - 0x100000000
         return f"sw x{rs2}, {imm_s}(x{rs1})"
+    elif instr == rv32i.EBREAK():
+        return "ebreak"
     else:
-        return f"??? (0x{instr:08X})"
+        return f"0x{instr:08X} (opcode 0b{opcode:07b})"
 
 
 # =============================================================================
@@ -233,6 +257,8 @@ class RISCVTester:
     CMD_RUN         = 0xCC
     CMD_HALT        = 0xDD
     CMD_RESET       = 0xEE
+    CMD_READ_CTR    = 0xBC
+    CTR_CYCLES, CTR_INSTRET, CTR_HALTED = 0, 1, 2
     
     def __init__(self, port, baudrate=115200, timeout=1.0):
         self.ser = serial.Serial(port, baudrate, timeout=timeout)
@@ -272,6 +298,32 @@ class RISCVTester:
             raise TimeoutError(f"Timeout reading register (got {len(data)} bytes)")
         return (data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3]
     
+    def read_counter(self, idx):
+        """Read a status/performance counter (0 cycles, 1 instret, 2 halted)"""
+        self.ser.write(bytes([self.CMD_READ_CTR, idx & 0x3]))
+        data = self.ser.read(4)
+        if len(data) != 4:
+            raise TimeoutError(f"Timeout reading counter (got {len(data)} bytes)")
+        return (data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3]
+
+    def run_to_ebreak(self, program, timeout=2.0, verbose=False):
+        """Load a program ending in EBREAK, run it until the core halts and
+        return (registers, cycles, instret) read from the halted core."""
+        self.reset_processor()
+        self.halt_processor()
+        self.load_program(program, verbose=verbose)
+        self.run_processor()
+        deadline = time.time() + timeout
+        while not self.read_counter(self.CTR_HALTED):
+            if time.time() > deadline:
+                raise TimeoutError("processor did not reach EBREAK")
+            time.sleep(0.005)
+        cycles = self.read_counter(self.CTR_CYCLES)
+        instret = self.read_counter(self.CTR_INSTRET)
+        regs = self.read_all_registers()
+        self.halt_processor()
+        return regs, cycles, instret
+
     def read_all_registers(self):
         """Read all 32 registers"""
         regs = {}
@@ -304,7 +356,13 @@ class RISCVTester:
         return ack[0] == self.CMD_RESET
     
     def load_program(self, program, start_addr=0, verbose=True):
-        """Load a list of instructions into memory"""
+        """Load a list of instructions into memory.
+
+        An EBREAK is appended if the program has none, so execution stops at
+        the end of the program instead of running into stale memory.
+        """
+        if rv32i.EBREAK() not in program:
+            program = list(program) + [rv32i.EBREAK()]
         self.program = program
         for i, instr in enumerate(program):
             addr = start_addr + i * 4
@@ -314,22 +372,12 @@ class RISCVTester:
                 print(f"  [{addr:04X}] {instr:08X}  {disasm}")
     
     def execute_program(self, program, run_time=0.1, verbose=True):
-        """Load and execute a program, return final register state"""
-        self.reset_processor()
-        time.sleep(0.01)
-        self.halt_processor()
-        
+        """Load and execute a program (EBREAK appended), return final registers"""
         if verbose:
-            print("Loading program...")
-        self.load_program(program, verbose=verbose)
-        
-        if verbose:
-            print("Running processor...")
-        self.run_processor()
-        time.sleep(run_time)
-        self.halt_processor()
-        
-        return self.read_all_registers()
+            print("Loading and running program...")
+        regs, _, _ = self.run_to_ebreak(list(program) + [rv32i.EBREAK()],
+                                        timeout=max(run_time, 1.0), verbose=verbose)
+        return regs
 
 
 # =============================================================================
@@ -1089,6 +1137,87 @@ Examples:
 
 
 # =============================================================================
+# Reference-model tests (no NOP padding: exercise forwarding, stalls, flushes)
+# =============================================================================
+
+def _compare_with_model(tester, program, label):
+    ref = rv32i.ISS(program)
+    ref.run()
+    regs, cycles, instret = tester.run_to_ebreak(program)
+    bad = [r for r in range(32) if regs[r] != ref.x[r]]
+    for r in bad:
+        print(f"  {label}: x{r} = 0x{regs[r]:08X} (expected 0x{ref.x[r]:08X}) ✗")
+    if instret != ref.retired:
+        print(f"  {label}: instret {instret} (expected {ref.retired}) ✗")
+    return not bad and instret == ref.retired, cycles, instret
+
+
+def test_control_flow(tester):
+    """Branches (all six conditions), JAL/JALR and load-use, back-to-back"""
+    print("\n" + "=" * 60)
+    print("TEST: Control Flow + Load-Use Hazards (no NOPs)")
+    print("=" * 60)
+    R = rv32i
+    prog = [R.ADDI(1, 0, -1), R.ADDI(2, 0, 1)]
+    for i, fn in enumerate(R.BRANCHES):
+        prog += [fn(1, 2, 8), R.ADDI(10 + i, 0, 1), fn(2, 1, 8), R.ADDI(20 + i, 0, 1)]
+    prog += [R.ADDI(3, 0, 0x55), R.SW(3, 0, 0x10), R.LW(4, 0, 0x10), R.ADDI(5, 4, 1),
+             R.LW(6, 0, 0x10), R.BEQ(6, 3, 8), R.ADDI(7, 0, 1),
+             R.JAL(8, 12), R.ADDI(9, 0, 1), R.EBREAK(), R.JALR(0, 8, 4), R.EBREAK()]
+    passed, _, _ = _compare_with_model(tester, prog, "control-flow")
+    print("  ✓ matches reference model" if passed else "  ✗ mismatch")
+    return passed
+
+
+def test_random_vs_model(tester, count=50, seed=2026):
+    """Random RV32I programs compared against the reference model"""
+    print("\n" + "=" * 60)
+    print(f"TEST: {count} Random Programs vs Reference Model")
+    print("=" * 60)
+    R = rv32i
+    rng = random.Random(seed)
+    regs_pool = list(range(1, 8))
+    clear = [R.SW(0, 9, off) for off in range(0, 128, 4)]   # dmem persists between runs
+    failures = 0
+    for n in range(count):
+        while True:
+            body = [R.ADDI(rng.choice(regs_pool), rng.choice(regs_pool + [0]), rng.randint(-2048, 2047))]
+            while len(body) < 60:
+                k = rng.random()
+                rd, a, b = rng.choice(regs_pool), rng.choice(regs_pool + [0]), rng.choice(regs_pool + [0])
+                if k < 0.4:   body.append(rng.choice(R.ALU_RR)(rd, a, b))
+                elif k < 0.6: body.append(rng.choice(R.ALU_RI)(rd, a, rng.randint(-2048, 2047)))
+                elif k < 0.7: body.append(rng.choice([R.LW, R.LH, R.LBU])(rd, 9, rng.randrange(0, 128, 4)))
+                elif k < 0.8: body.append(rng.choice([R.SW, R.SH, R.SB])(a, 9, rng.randrange(0, 128, 4)))
+                elif k < 0.9: body.append(rng.choice(R.BRANCHES)(a, b, 4 * rng.randint(1, 4)))
+                else:         body.append(R.JAL(rd, 4 * rng.randint(1, 4)))
+            prog = [*R.li(9, 0x100), *clear, *body, R.EBREAK(), R.EBREAK(), R.EBREAK(), R.EBREAK()]
+            try:
+                R.ISS(prog).run(max_steps=2000)
+                break
+            except RuntimeError:
+                continue
+        ok, _, _ = _compare_with_model(tester, prog, f"prog {n}")
+        failures += not ok
+    print(f"  {count - failures}/{count} programs matched the reference model")
+    return failures == 0
+
+
+def test_cpi(tester):
+    """Run the benchmark programs and report CPI from the on-chip counters"""
+    print("\n" + "=" * 60)
+    print("TEST: Benchmarks + Hardware Performance Counters")
+    print("=" * 60)
+    passed = True
+    for name, gen in BENCHMARKS.items():
+        ok, cycles, instret = _compare_with_model(tester, gen(), name)
+        passed &= ok
+        print(f"  {name:16s} cycles={cycles:6d} instret={instret:6d} "
+              f"CPI={cycles / instret:.3f} {'✓' if ok else '✗'}")
+    return passed
+
+
+# =============================================================================
 # Main
 # =============================================================================
 
@@ -1106,6 +1235,9 @@ def run_all_tests(tester):
         ("Comparison (SLT/SLTI)", test_comparison),
         ("Data Forwarding", test_data_forwarding),
         ("All Registers (x1-x31)", test_all_registers),
+        ("Control Flow + Load-Use", test_control_flow),
+        ("Random vs Reference Model", test_random_vs_model),
+        ("Benchmarks + CPI", test_cpi),
     ]
     
     results = []
@@ -1157,7 +1289,8 @@ Examples:
     parser.add_argument('-i', '--interactive', action='store_true', 
                         help='Enter interactive mode')
     parser.add_argument('-t', '--test', 
-                        choices=['all', 'alu', 'arith', 'logic', 'shift', 'cmp', 'fwd', 'regs'],
+                        choices=['all', 'alu', 'arith', 'logic', 'shift', 'cmp', 'fwd', 'regs',
+                                 'ctrl', 'random', 'cpi'],
                         default='all', help='Specific test to run')
     args = parser.parse_args()
     
@@ -1190,6 +1323,9 @@ Examples:
                 'cmp': test_comparison,
                 'fwd': test_data_forwarding,
                 'regs': test_all_registers,
+                'ctrl': test_control_flow,
+                'random': test_random_vs_model,
+                'cpi': test_cpi,
             }
             if args.test in test_map:
                 passed = test_map[args.test](tester)
