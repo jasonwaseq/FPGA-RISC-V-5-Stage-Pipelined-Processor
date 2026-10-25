@@ -39,6 +39,8 @@ module riscv_top (
     //   0xCC                                         : Run processor
     //   0xDD                                         : Halt processor
     //   0xEE                                         : Reset processor
+    //   0xBC <idx>                                   : Read status/counter
+    //        idx 0 = cycles, 1 = instructions retired, 2 = halted (EBREAK)
     // =========================================================================
     typedef enum logic [2:0] {
         ST_IDLE,
@@ -61,6 +63,20 @@ module riscv_top (
     logic [31:0]  dbg_reg_data;
     logic [31:0]  response;
     logic [2:0]   resp_cnt;  // Changed to 3 bits for 0-4 counting
+    logic         rd_perf;   // 1: ST_WAIT_REG returns a counter, not a register
+    logic [1:0]   perf_idx;
+    logic         cpu_halted;
+    logic [31:0]  perf_cycles, perf_instret;
+    logic [31:0]  perf_value;
+
+    always_comb begin
+        case (perf_idx)
+            2'd0:    perf_value = perf_cycles;
+            2'd1:    perf_value = perf_instret;
+            2'd2:    perf_value = {31'd0, cpu_halted};
+            default: perf_value = 32'd0;
+        endcase
+    end
     
     // Instruction memory write interface
     logic        imem_we;
@@ -74,7 +90,7 @@ module riscv_top (
     assign led[1] = uart_rx_valid;
     assign led[2] = uart_tx_valid;
     assign led[3] = (state != ST_IDLE);
-    assign led[4] = imem_addr[4];  // Show PC activity
+    assign led[4] = cpu_halted;    // Program finished (EBREAK)
 
     // =========================================================================
     // Command Processing State Machine
@@ -95,6 +111,8 @@ module riscv_top (
             imem_we      <= 1'b0;
             resp_cnt     <= 3'd0;
             response     <= 32'd0;
+            rd_perf      <= 1'b0;
+            perf_idx     <= 2'd0;
         end else begin
             imem_we <= 1'b0;
             cpu_rst <= 1'b0;
@@ -111,6 +129,12 @@ module riscv_top (
                             end
                             8'hBB: begin
                                 state <= ST_READ_REG;
+                                rd_perf <= 1'b0;
+                                uart_rx_ready <= 1'b0;
+                            end
+                            8'hBC: begin
+                                state <= ST_READ_REG;
+                                rd_perf <= 1'b1;
                                 uart_rx_ready <= 1'b0;
                             end
                             8'hCC: begin
@@ -188,6 +212,7 @@ module riscv_top (
                     uart_rx_ready <= 1'b1;
                     if (uart_rx_valid && uart_rx_ready) begin
                         dbg_reg_addr <= uart_rx_data[4:0];
+                        perf_idx <= uart_rx_data[1:0];
                         state <= ST_WAIT_REG;
                         uart_rx_ready <= 1'b0;
                     end
@@ -195,7 +220,7 @@ module riscv_top (
                 
                 ST_WAIT_REG: begin
                     // Wait one cycle for register file to output the data
-                    response <= dbg_reg_data;
+                    response <= rd_perf ? perf_value : dbg_reg_data;
                     resp_cnt <= 3'd0;
                     state <= ST_SEND_RESPONSE;
                 end
@@ -247,7 +272,10 @@ module riscv_top (
         .dmem_we      (dmem_we),
         .dmem_be      (dmem_be),
         .dbg_reg_addr (dbg_reg_addr),
-        .dbg_reg_data (dbg_reg_data)
+        .dbg_reg_data (dbg_reg_data),
+        .halted       (cpu_halted),
+        .perf_cycles  (perf_cycles),
+        .perf_instret (perf_instret)
     );
 
     // =========================================================================
