@@ -42,8 +42,8 @@
 #define SYS_CLK_HZ      (MMIO_BASE + 0x2008)
 #define SYS_ID          (MMIO_BASE + 0x200C)
 
-#define LED_RED         0x01
-#define LED_GREEN       0x02
+#define LED_RED         0x01            /* on the main board */
+#define LED_1           0x02            /* LED1..LED5 on the break-off PMOD */
 
 /* Framing of the reports the ROM sends when a program ends */
 #define REPORT_ESC      0x1B

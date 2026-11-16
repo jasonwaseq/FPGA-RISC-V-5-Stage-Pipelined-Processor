@@ -192,6 +192,37 @@ async def test_monitor_xip(dut):
 
 
 @cocotb.test()
+async def test_warm_reboot(dut):
+    """Reset and boot from flash again. The branch target buffer is not cleared
+    by reset, so the second boot runs the ROM and the first fetches from flash
+    with predictions left over from the monitor."""
+    board = await start(dut, flash_image=firmware("monitor.img"))
+
+    @bridge
+    def host():
+        ser = board.ser
+
+        def until(marker, timeout=15):
+            ser.timeout = timeout
+            text = bytearray()
+            while not text.endswith(marker):
+                byte = ser.read(1)
+                assert byte, f"timeout waiting for {marker!r}, got {bytes(text)!r}"
+                text += byte
+            return bytes(text)
+
+        first = until(b"> ")
+        ser.write(b"info" + bytes([13]))
+        until(b"> ")
+        ser.send_break()
+        second = until(b"> ")
+        return first, second
+
+    first, second = await host()
+    assert b"RV32IM monitor" in first and b"RV32IM monitor" in second, (first, second)
+
+
+@cocotb.test()
 async def test_interrupts(dut):
     """Timer, software and UART receive interrupts, taken and returned from."""
     board = await start(dut)

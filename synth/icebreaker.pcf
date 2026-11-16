@@ -3,10 +3,10 @@
 # 12 MHz oscillator
 set_io CLK 35
 
-# User button and LEDs on the main board (active low)
+# User button and red LED on the main board (active low).
+# The green LED (pin 37) is left unused: driving it disturbs the SPI flash.
 set_io BTN_N  10
 set_io LEDR_N 11
-set_io LEDG_N 37
 
 # UART through the FTDI bridge (channel B)
 set_io RX 6
@@ -17,6 +17,8 @@ set_io FLASH_SCK 15
 set_io FLASH_SSB 16
 set_io FLASH_IO0 14
 set_io FLASH_IO1 17
+set_io FLASH_IO2 12
+set_io FLASH_IO3 13
 
 # Break-off PMOD (PMOD2): five LEDs and three buttons
 set_io -nowarn LED1 26

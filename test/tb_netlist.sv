@@ -9,7 +9,7 @@ module tb_netlist;
 
     reg clk = 0, rst = 1;
     wire uart_tx, flash_csn, flash_sck, flash_mosi, flash_miso;
-    wire [6:0] gpio_out;
+    wire [5:0] gpio_out;
 
     always #5 clk = ~clk;
 

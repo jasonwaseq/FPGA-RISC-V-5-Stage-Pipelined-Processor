@@ -18,7 +18,6 @@ module icebreaker_top #(
     input  wire CLK,            // 12 MHz
     input  wire BTN_N,          // user button, active low
     output wire LEDR_N,
-    output wire LEDG_N,
     output wire LED1, LED2, LED3, LED4, LED5,
     input  wire BTN1, BTN2, BTN3,
     input  wire RX,
@@ -26,8 +25,15 @@ module icebreaker_top #(
     output wire FLASH_SCK,
     output wire FLASH_SSB,
     output wire FLASH_IO0,      // MOSI
-    input  wire FLASH_IO1       // MISO
+    input  wire FLASH_IO1,      // MISO
+    output wire FLASH_IO2,      // WP#
+    output wire FLASH_IO3       // HOLD#
 );
+
+    // The flash is used in plain SPI mode, where IO2 and IO3 are its WP# and
+    // HOLD# inputs: hold them inactive rather than leave them floating.
+    assign FLASH_IO2 = 1'b1;
+    assign FLASH_IO3 = 1'b1;
 
     // ---- Clock -------------------------------------------------------------------
     wire clk, pll_locked;
@@ -76,7 +82,7 @@ module icebreaker_top #(
     end
 
     // ---- System --------------------------------------------------------------------
-    wire [6:0] gpio_out;
+    wire [5:0] gpio_out;
 
     soc #(
         .CLK_HZ   (CLK_HZ),
@@ -96,9 +102,10 @@ module icebreaker_top #(
         .gpio_in    ({!btn_s[1], BTN3, BTN2, BTN1})
     );
 
+    // The green LED (pin 37) is deliberately not used: on the board this was
+    // developed on, driving that pin low corrupts reads from the SPI flash.
     assign LEDR_N = !gpio_out[0];
-    assign LEDG_N = !gpio_out[1];
-    assign {LED5, LED4, LED3, LED2, LED1} = gpio_out[6:2];
+    assign {LED5, LED4, LED3, LED2, LED1} = gpio_out[5:1];
 
 endmodule
 

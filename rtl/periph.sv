@@ -216,14 +216,14 @@ endmodule
 // -----------------------------------------------------------------------------
 // GPIO and system information
 //
-//   0x0 OUT     LEDs
+//   0x0 OUT     LEDs (bit 0: on-board red LED, bits 1-5: PMOD LEDs)
 //   0x4 IN      buttons
 //   0x8 CLK_HZ  system clock frequency (read-only)
 //   0xC ID      "RV5S" (read-only)
 // -----------------------------------------------------------------------------
 module gpio #(
     parameter int CLK_HZ = 12_000_000,
-    parameter int NOUT   = 7,
+    parameter int NOUT   = 6,
     parameter int NIN    = 4
 ) (
     input  wire             clk,

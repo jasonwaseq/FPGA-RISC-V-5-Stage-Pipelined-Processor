@@ -6,7 +6,7 @@
  * pulls the code in line by line, and only its data lives in RAM (the upper
  * 64 KB; the lower 64 KB is free for whatever the user loads).
  *
- * A 100 Hz timer interrupt keeps the uptime and blinks the green LED.
+ * A 100 Hz timer interrupt keeps the uptime and blinks an LED.
  */
 #include "lib.h"
 
@@ -22,7 +22,7 @@ void irq_handler(uint32_t cause)
         return;
     ticks++;
     if (ticks % 50 == 0)
-        REG32(GPIO_OUT) ^= LED_GREEN;
+        REG32(GPIO_OUT) ^= LED_1;
     uint64_t next = rdcycle64() + tick_period;
     REG32(MTIMECMP_HI) = 0xFFFFFFFF;
     REG32(MTIMECMP_LO) = (uint32_t)next;
@@ -241,7 +241,7 @@ int main(void)
     REG32(MTIMECMP_HI) = (uint32_t)(first >> 32);
     csr_set(mie, MIE_MTIE);
     csr_set(mstatus, MSTATUS_MIE);
-    REG32(GPIO_OUT) = LED_GREEN;
+    REG32(GPIO_OUT) = LED_1;
 
     printf("\nRV32IM monitor (running in place from SPI flash). Type 'help'.\n");
 

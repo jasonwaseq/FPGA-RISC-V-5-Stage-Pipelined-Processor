@@ -153,7 +153,7 @@ void boot_main(void)
             src = dst;
         }
         if (crc32((const uint8_t *)src, n) == h->crc) {
-            REG32(GPIO_OUT) = LED_GREEN;
+            REG32(GPIO_OUT) = LED_1;
             run(h->entry);
         }
         print("boot image corrupt\r\n");

@@ -333,7 +333,7 @@ def test_monitor(board):
         print("    " + line)
     payload = random.Random(3).randbytes(2048)
     ser.write(b"load 0x2000 2048\r")
-    until(b"ready\n")
+    until(b"ready\r\n")
     ser.write(payload)
     loaded = until(b"> ")
     ok = f"{zlib.crc32(payload) & MASK:08x}" in loaded

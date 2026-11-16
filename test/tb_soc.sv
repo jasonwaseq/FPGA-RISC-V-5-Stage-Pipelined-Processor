@@ -15,7 +15,7 @@ module tb_soc #(
     input  wire       rst,
     input  wire       uart_rx,
     output wire       uart_tx,
-    output wire [6:0] gpio_out,
+    output wire [5:0] gpio_out,
     input  wire [3:0] gpio_in
 );
     wire flash_csn, flash_sck, flash_mosi, flash_miso;

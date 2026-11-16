@@ -44,8 +44,19 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then \
 ENV PATH="/opt/sv2v-Linux:${PATH}"
 ENV PATH="/opt/sv2v/bin:${PATH}"
 
-# install cocotb for simulation (PEP 668: allow system install)
-RUN python3 -m pip install --break-system-packages cocotb pytest
+# install cocotb for simulation and pyserial for the host scripts
+# (PEP 668: allow system install)
+RUN python3 -m pip install --break-system-packages cocotb pytest pyserial
+
+# bare-metal RISC-V GCC for the firmware (rv32im multilib)
+RUN if [ "$TARGETARCH" = "amd64" ]; then \
+        cd /opt && \
+        wget -q https://github.com/xpack-dev-tools/riscv-none-elf-gcc-xpack/releases/download/v15.2.0-1/xpack-riscv-none-elf-gcc-15.2.0-1-linux-x64.tar.gz && \
+        tar -xf xpack-riscv-none-elf-gcc-15.2.0-1-linux-x64.tar.gz && \
+        rm xpack-riscv-none-elf-gcc-15.2.0-1-linux-x64.tar.gz; \
+    fi
+
+ENV PATH="/opt/xpack-riscv-none-elf-gcc-15.2.0-1/bin:${PATH}"
 
 USER vscode
 

@@ -42,7 +42,7 @@ module soc #(
     output wire        flash_sck,
     output wire        flash_mosi,
     input  wire        flash_miso,
-    output wire [6:0]  gpio_out,
+    output wire [5:0]  gpio_out,
     input  wire [3:0]  gpio_in
 );
 

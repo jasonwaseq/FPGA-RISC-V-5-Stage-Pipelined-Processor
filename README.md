@@ -1,124 +1,307 @@
-# FPGA RISC-V 5-Stage Pipelined Processor
+# RV32IM SoC on an iCE40UP5K: 5-stage pipeline, I-cache, branch prediction, boot ROM, firmware
 
-An RV32I 5-stage in-order pipelined processor in SystemVerilog, running on the iCEBreaker (Lattice iCE40UP5K) FPGA. It implements the full RV32I base integer ISA with a bypass network, a load-use interlock and branch/jump flush. A UART debug interface loads programs, reads registers and reads on-chip performance counters. The design is verified with cocotb against an instruction-set reference model, and CPI is measured with and without forwarding.
+A complete RISC-V computer in a 5,280-LUT FPGA (iCEBreaker v1.1a). The core is
+an RV32IM 5-stage pipeline with machine-mode traps and interrupts. Around it is
+a memory system built for what this FPGA actually has: an instruction cache and
+a branch target buffer in block RAM, 128 KB of single-port SPRAM as main memory,
+and the 16 MB configuration flash as execute-in-place storage. A boot ROM, a C
+runtime and an interactive monitor make it usable from a serial terminal.
+
+Everything below was measured on the board.
+
+| | |
+|---|---|
+| ISA | RV32IM, Zicsr, Zifencei, M-mode (precise exceptions; timer, software and external interrupts) |
+| **CoreMark** | **3.11 CoreMark/MHz** (56 CoreMark at 18 MHz), validated run, 10.7 s |
+| CPI | 1.15 on CoreMark; 1.05 to 1.26 on the kernels below |
+| Clock | 18 MHz from the PLL; place and route reports 20 to 21.7 MHz across seeds |
+| Area | 4,661 / 5,280 logic cells, 28 / 30 block RAMs, 4 / 4 SPRAM, 4 / 8 DSP |
+| Memory | 128 KB RAM, 8 KB I-cache, 256-entry BTB, 2 KB boot ROM, 16 MB flash (XIP) |
+| Verification | 57 / 57 official riscv-tests, 1,000 random programs per build against a reference model, full-system and gate-level simulation, and the same tests again on hardware |
+
+The starting point was a plain RV32I pipeline with a debug FSM on the UART:
+4,938 logic cells, 13.9 MHz, 1 KB of memory, no way to run compiled code.
+
+## Architecture
+
+```
+                    +------------------ riscv_core ------------------+
+                    |  F        D        X          M          W     |
+   128 KB SPRAM <---+- I-cache  decode   bypass     commit     reg   |
+   boot ROM     <---+  (8 KB)   regfile  ALU        load align write |
+   SPI flash    <---+  BTB      (BRAM)   branch     store            |
+       ^  refill    |  PC                mul (DSP)  CSR / trap       |
+       |            |                    div        redirect         |
+       |            +----------+------------+----------+-------------+
+       |                       | load addr  | store    | slow bus
+       +-----------------------+------------+          v
+         RAM port: store > load > refill        ROM, flash, UART, timer, GPIO
+```
+
+### Pipeline
+
+| Stage | What happens |
+|---|---|
+| F | PC, I-cache and BTB lookup. All three are block RAMs addressed with the *next* PC, so a correctly predicted taken branch costs nothing. |
+| D | Decode, immediates, register file (block RAM whose read address comes straight from the I-cache output), late-result interlock, bypass selects for X. |
+| X | 4:1 bypass muxes, ALU, barrel shifter, branch resolution, 16x16 partial products (DSP), iterative divider. The address adder drives the RAM directly. |
+| M | Commit point: load alignment, stores, CSR access, traps, interrupts, MRET, and the redirect for a misprediction found in X. |
+| W | Register write. Never stalls. |
+
+| Event | Cost |
+|---|---|
+| Dependent ALU operations | 0 cycles |
+| Load, MUL or CSR result used by the next instruction | 1 cycle |
+| Load directly behind a store (one RAM port) | 1 cycle |
+| Predicted branch or jump | 0 cycles |
+| Mispredicted branch or jump, trap, MRET, FENCE.I | 3 cycles |
+| MULH\* / DIV, REM | 4 / 34 cycles |
+| I-cache miss | 11 cycles from RAM, about 580 from flash |
+
+These are checked cycle-exactly in simulation (`test_timing`).
+
+### Design decisions that came from the FPGA
+
+On this part a LUT plus its routing costs about 3 ns and the large RAMs sit at
+the edge of the die. The first version of the new core, written the textbook
+way, reached 12.9 MHz. The critical path was RAM output, load alignment, bypass
+mux, branch comparator, next-PC mux, I-cache address: 78 ns. The fixes are the
+shape of the pipeline:
+
+- **Nothing that leaves X is combinational.** Branches are resolved in X but
+  the redirect is issued from M. That makes a misprediction cost 3 cycles
+  instead of 2, which is why there is a branch target buffer: on CoreMark 91%
+  of branches are predicted and cost nothing.
+- **Loads are read from X.** The address adder feeds the RAM directly, the data
+  is aligned in M and reaches the bypass network from a register. Stores still
+  happen at commit, so the single RAM port is arbitrated: a store wins, a load
+  right behind it waits one cycle.
+- **Bypass selects are computed in D.** X starts with a plain 4:1 mux instead of
+  register-number comparators.
+- **The register file is block RAM.** That removed 992 flip-flops and two
+  32:1 read muxes. A
+  block RAM cannot return data written on the same edge, so one bypass in D
+  covers the instruction that just left W and the X-stage network covers the
+  rest.
+- **The interlock uses its own shallow decode**, because it feeds the fetch
+  address. It can stall an illegal instruction for a cycle it did not need; it
+  never misses a real dependence.
+
+Result: 12.9 MHz to 21 MHz, with a lower CPI than the starting design.
+
+### Memory system
+
+The SPRAM is single ported and the flash is serial, yet the core needs an
+instruction and a data access every cycle. The I-cache is what reconciles the
+two: fetch almost always hits in block RAM, which leaves the RAM port to the
+data side.
+
+- **I-cache**: 8 KB, direct mapped, 32-byte lines, tags and data in block RAM.
+  A miss refills a line through a pipelined request/response port from
+  whichever memory holds the code. FENCE.I flushes it.
+- **Branch target buffer**: 256 entries, 2-bit counters, for branches, JAL and
+  JALR. It is only a hint. X checks the direction *and* the target of every
+  prediction, so a stale or aliased entry costs a misprediction and nothing
+  else. That is what allows 6-bit tags and no flush when code is replaced.
+- **RAM**: four SB_SPRAM256KA as two 64 KB banks. Both banks are read on every
+  access and a registered bit picks the result, which keeps the bank decode off
+  the address path.
+- **SPI flash**: memory-mapped, read-only. A request for the next word continues
+  the open read instead of sending a new command, so a cache line costs one
+  command plus eight words; a repeat of the last word is answered from the
+  shift register. Programs can run directly from flash.
+- **Slow bus**: ROM, flash and MMIO use a request/acknowledge handshake that
+  holds the pipeline. Access outside the map raises a precise access fault.
+
+| Address | Region |
+|---|---|
+| `0x0000_0000` | 128 KB RAM |
+| `0x0010_0000` | 2 KB boot ROM |
+| `0x0100_0000` | 16 MB SPI flash (boot image at +1 MB, behind the bitstream) |
+| `0x8000_0000` | UART (512-byte receive FIFO) · `0x8000_1000` timer / software interrupt · `0x8000_2000` GPIO, clock frequency, ID |
+
+### Traps
+
+Every exception and interrupt is taken on the instruction in M, before it
+changes any state, so traps are precise. Implemented: instruction, load and
+store access faults and misalignment, illegal instruction (including unknown
+CSRs), ECALL, EBREAK, and the machine timer, software and external interrupts
+with `mstatus`, `mie`, `mip`, `mtvec`, `mepc`, `mcause`, `mtval`, `mscratch`.
+`mcycle`, `minstret` and four `mhpmcounter`s (I-cache misses, mispredictions,
+branches, interlock stalls) provide the numbers in this file.
+
+## Software
+
+**Boot ROM** (1.2 KB, `firmware/bootrom`). After reset it listens on the UART
+for half a second. If the host answers it becomes a loader (write, read, CRC,
+run); otherwise it boots the image stored in flash, either copied to RAM or
+executed in place, after checking its CRC. It is also the crash handler: an
+unhandled trap saves all registers where the host can read them and reports
+`mcause`, `mepc` and `mtval`.
+
+A break on the UART resets the system from any state, so the host can always
+take the board back without touching it.
+
+**Monitor** (`firmware/monitor`). The interactive shell, stored in flash and
+executed in place. A 100 Hz timer interrupt keeps the uptime. Excerpt from a
+session on the board:
+
+```
+RV32IM SoC boot ROM
+
+RV32IM monitor (running in place from SPI flash). Type 'help'.
+> info
+RV32IM_Zicsr_Zifencei, 5-stage pipeline, M-mode
+clock   18.00 MHz
+memory  128 KB RAM at 0x00000000, boot ROM at 0x00100000, 16 MB flash at 0x01000000
+cache   8 KB direct-mapped I-cache (32-byte lines), 256-entry BTB
+> bench
+sieve         339304 cycles    308903 instrs  CPI 1.098  I-miss     6  mispredict   2317 (2.3% of 97752 branches)
+shellsort     357914 cycles    319315 instrs  CPI 1.120  I-miss    13  mispredict  10795 (16.1% of 66851 branches)
+crc32         544346 cycles    518407 instrs  CPI 1.050  I-miss     2  mispredict   8203 (10.8% of 75791 branches)
+matmul         83889 cycles     67459 instrs  CPI 1.243  I-miss     8  mispredict    453 (4.9% of 9222 branches)
+```
+
+Other commands: `md`, `mw`, `load`, `crc`, `go`, `perf`, `led`, `reboot`.
+
+**C runtime** (`firmware/common`): start-up code, linker scripts for RAM and
+for execute-in-place, `printf`, interrupt entry, counters.
+
+**Host tool** (`scripts/rvhost.py`): `rvhost.py program.bin` uploads a program,
+runs it and prints its output and exit code; `--term` opens the monitor.
 
 ## Results
 
-| Metric | Value |
-|---|---|
-| ISA | RV32I base (all 37 user-level integer instructions + EBREAK/ECALL halt) |
-| Pipeline | F / D / X / M / W, in-order, single issue, static not-taken prediction |
-| Hazard cost | Dependent ALU ops: **0 stalls** · Load-use: **1 cycle** · Taken branch/jump: **2 cycles** |
-| Area (iCE40UP5K) | 4,938 / 5,280 logic cells (93%), 4 / 30 BRAM |
-| Timing | Meets the 12 MHz board clock; Fmax 14.1–14.8 MHz across placement seeds |
-| Verification | 7 directed suites + 1,000 constrained-random programs per build vs. reference model; cycle-exact hazard-penalty checks; full-system UART test |
+### CoreMark (on the board)
 
-### CPI with and without forwarding
+```
+CoreMark Size    : 666
+Iterations       : 600
+Compiler version : GCC15.2.0
+Compiler flags   : -O2 -funroll-loops -finline-functions
+seedcrc 0xe9f5  crclist 0xe714  crcmatrix 0x1fd7  crcstate 0x8e3a  crcfinal 0xbd59
+Correct operation validated.
 
-Same RTL; the `FORWARDING` parameter swaps the bypass network for a pure interlock (stall until the producer writes back). Cycle counts come from the on-chip performance counters.
+cycles        : 193090896
+instructions  : 167967471
+CPI           : 1.149
+branches      : 29571329, mispredicted 2755392 (9.31%)
+I-cache misses: 207461
+interlock     : 13527200 stall cycles
+CoreMark/MHz  : 3.107
+```
 
-| Benchmark | Instructions | CPI (forwarding) | CPI (interlock only) | Speedup |
+With plain `-O2` the score is 2.94. Where the cycles above 1.0 CPI go: 7.0%
+load-use and MUL-use interlocks, 4.3% mispredictions, 1.2% I-cache misses.
+
+### What the branch target buffer buys
+
+Same RTL with `BPRED=0` (static not-taken), from `make sim`:
+
+| Kernel | Instructions | CPI with BTB | CPI static | Speedup |
 |---|---:|---:|---:|---:|
-| Fibonacci (24 terms) | 173 | 1.289 | 1.711 | 1.33× |
-| Array fill + sum (64 words) | 519 | 1.617 | 2.237 | 1.38× |
-| Bubble sort (16 words) | 1,088 | 1.360 | 1.764 | 1.30× |
-| Dependent ALU chain | 202 | 1.020 | 3.000 | 2.94× |
+| Fibonacci | 172 | 1.180 | 1.547 | 1.31x |
+| Array fill + sum | 518 | 1.191 | 1.898 | 1.59x |
+| Bubble sort | 1,087 | 1.199 | 1.513 | 1.26x |
+| Dependent ALU chain | 210 | 1.252 | 1.324 | 1.06x |
+| Matrix multiply | 2,436 | 1.259 | 1.508 | 1.20x |
 
-Reproduce with `make sim`.
-
-## Microarchitecture
-
-```
-          +-------+     +-------+     +-------+     +-------+     +-------+
-  imem -->|   F   |---->|   D   |---->|   X   |---->|   M   |---->|   W   |
- (BRAM)   +-------+ IF/ +-------+ ID/ +-------+ EX/ +-------+ MEM/+-------+
-              ^     ID      |     EX   ^  |  ^   MEM    |     WB      |
-              |             |          |  |  +--EX/MEM--+             |
-              |  redirect   |          |  +-----MEM/WB----------------+
-              +-------------------------  (forwarding into X)
-                            ^
-                            +---- W -> D register-file write-through
-```
-
-- **Fetch.** The instruction memory is a synchronous iCE40 BRAM, so it is addressed with the *next* PC. The instruction for `f_pc` is on the bus during F. On a stall, the address is held and the BRAM re-reads the same word.
-- **Decode.** Generates immediates for all formats and the control signals. The register file has two read ports with W→D write-through. Reads of `x0` never cause a hazard.
-- **Execute.** The ALU, the branch comparator and the jump-target adders. Operands come from a forwarding mux with priority EX/MEM > MEM/WB > register file. Branches and jumps resolve here: a taken branch redirects fetch and squashes the two younger instructions.
-- **Memory.** Byte enables and data steering for SB/SH/SW. The data-memory BRAM is addressed in M.
-- **Writeback.** The load data arrives from the BRAM in W and is sign- or zero-extended for LB/LH/LBU/LHU. It is forwarded straight from W to X, which is why load-use costs only one stall.
-- **Hazard unit.** With forwarding, only a load followed immediately by a consumer stalls (1 cycle). With `FORWARDING=0`, any RAW dependence on an instruction in X or M stalls.
-- **Halt and counters.** EBREAK/ECALL squashes younger instructions, stops fetch, drains the pipeline and freezes the core. `perf_cycles` and `perf_instret` stop at the same time, so CPI = cycles / instret for exactly the program that ran.
-
-The critical path runs from the data-memory BRAM output, through load alignment and the forwarding mux, into the branch comparator and on to the fetch address. That is the cost of resolving branches in X with full forwarding.
+These short runs include their cold I-cache misses. On the board, read through
+`mcycle`, the same kernels come out within a few cycles of the simulation.
 
 ## Verification
 
-`test/test_riscv.py` (cocotb + Icarus Verilog) runs the core with the real synchronous memories (`test/tb_core.sv`). Every program runs back-to-back with **no NOP padding**:
+| Level | What runs | Command |
+|---|---|---|
+| Core in the SoC | 11 directed tests, cycle-exact hazard costs, 1,000 constrained-random RV32IM programs per build compared register-by-register and word-by-word with an instruction-set model (`test/rv32i.py`). Both builds (BTB and static). | `make sim` |
+| ISA | The official riscv-tests, unmodified: rv32ui, rv32um, rv32mi. 57 / 57. | `make sim-isa` |
+| System | The real boot ROM image: UART loader, C programs, trap reports, flash boot (copy and XIP), CRC rejection, warm reboot, the monitor, interrupts. Driven by the same host code as the board. | `make sim-system` |
+| Netlist | The synthesised iCE40 netlist (SPRAM, block RAM and DSP primitives) boots the ROM. | `make sim-netlist` |
+| Hardware | All of the above again on the FPGA over the UART, plus a full 124 KB RAM test and CoreMark. | `make test-fpga` |
 
-| Suite | What it checks |
-|---|---|
-| `test_forwarding_chain`, `test_forwarding_paths` | EX/MEM and MEM/WB paths on both operands, youngest-producer priority, x0, store-data forwarding |
-| `test_load_use` | Load followed by ALU, store-data, address and branch consumers |
-| `test_branches`, `test_jumps` | All six branch conditions taken and not taken; JAL/JALR links, targets, bit-0 clearing, call/return |
-| `test_upper_immediates`, `test_byte_half` | LUI/AUIPC; SB/SH/LB/LBU/LH/LHU at every byte offset |
-| `test_timing` | Cycle-exact penalties: 0 for dependent ALU ops, 1 for load-use, 2 for a taken branch |
-| `test_random_programs` | 1,000 constrained-random programs (dense hazards, forward branches, JAL/JALR, sub-word memory ops); registers, memory and retired-instruction count all compared against `test/rv32i.py` |
-| `test_benchmarks` | Benchmarks checked against the model, with CPI recorded |
+`python3 scripts/test_fpga.py --coremark` on the board:
 
-The whole suite runs on both the forwarding and the interlock-only builds. The tests were also checked against a deliberately broken core with one forwarding path removed: the directed, random and benchmark suites all fail on it.
+| Group | Result | What it covers |
+|---|---|---|
+| loader | pass | 124 KB written, CRC-checked and read back through the ROM |
+| isa | pass | 57 / 57 riscv-tests |
+| random | pass | 200 / 200 random programs match the reference model |
+| cpi | pass | kernels match the model; cycles and instructions from the CSRs |
+| traps | pass | 9 exception types with exact cause, pc and `mtval` |
+| c | pass | hello, memory test, timer + software + UART interrupts |
+| tasks | pass | sort, CRC-32, sum, sieve, matrix product on data sent by the host |
+| monitor | pass | power-up boot from flash, shell commands, benchmarks |
+| coremark | pass | validated run |
 
-`test/test_top.py` simulates the full FPGA top level (core, BRAMs and UART at 115200 baud) and drives it with the **unmodified** host script `scripts/test_fpga.py` through a simulated serial port. This covers the command protocol and the counter readout before anything goes on the board.
+Bugs worth mentioning, because of where they were found:
 
-## Running
+- **A stale prediction squashed an MMIO store.** A BTB entry left by earlier
+  code predicted "taken" on a store to the UART. The misprediction redirect
+  fired in the store's first cycle in M, before its bus access finished, and
+  the store was lost. No core-level test had a slow access at an address with
+  a stale entry; the full-system test showed it as one missing character.
+  There is now a directed test (`test_stale_prediction_on_mmio_store`).
+- **The boot ROM synthesised as zeros.** Yosys dropped a `$readmemh` that sat
+  behind `if (INIT_FILE != "")`. RTL simulation was fine; the gate-level
+  simulation was added to find this and stays in the flow.
+- **Flash reads corrupted by an LED.** The monitor ran from RAM and failed
+  from flash. Bisecting on the board showed that words read from flash gained
+  extra 1 bits only while pin 37 (the green LED) was driven low, independent of
+  the logic driving it. That pin is left unused; WP# and HOLD# are now driven
+  rather than left floating.
+- **`minstret` off by one.** It counted at writeback, so a CSR read saw a value
+  that depended on pipeline bubbles. It now counts at commit.
+
+## Building and running
+
+Tools: [OSS CAD Suite](https://github.com/YosysHQ/oss-cad-suite-build) (Yosys,
+nextpnr, icestorm), Icarus Verilog, cocotb 2, pyserial, and a bare-metal RISC-V
+GCC such as xPack `riscv-none-elf-gcc` (only needed for firmware; the boot ROM
+image is checked in).
 
 ```bash
-# Simulation (requires cocotb >= 2.0 and Icarus Verilog)
-make sim        # both builds + CPI comparison table
-make sim-fwd    # forwarding build only
-make sim-top    # full system over UART (a few minutes)
+make sim            # core suite on both builds, CPI table
+make firmware isa   # boot ROM, monitor, programs, riscv-tests
+make sim-isa sim-system sim-netlist
 
-# FPGA (Yosys + nextpnr-ice40 + icestorm)
-make build
-make prog
-
-# Hardware tests over UART (pyserial)
-python3 scripts/test_fpga.py              # full suite, including random programs vs. model and CPI
-python3 scripts/test_fpga.py -t cpi       # benchmarks + on-chip counters
-python3 scripts/test_fpga.py -i           # interactive assembler / debugger
+make build prog     # bitstream (18 MHz) -> board
+make flash-monitor  # monitor into SPI flash at 1 MB
+make test-fpga      # hardware suite
+make test-coremark
+make term           # monitor shell
 ```
 
-## UART Protocol (115200 baud, 8N1)
+`PLL_DIVF` selects the clock (12 MHz x (DIVF + 1) / 32). The UART divider and
+the firmware pick the frequency up from the build, so nothing else changes.
 
-| Command | Format | Description |
-|---|---|---|
-| Write instruction | `0xAA <addr_hi> <addr_lo> <d3> <d2> <d1> <d0>` | Write a 32-bit word to instruction memory |
-| Read register | `0xBB <reg>` | Returns 4 bytes (valid while halted) |
-| Read counter | `0xBC <idx>` | Returns 4 bytes: 0 = cycles, 1 = instructions retired, 2 = halted flag |
-| Run | `0xCC` | Release the pipeline from reset |
-| Halt | `0xDD` | Hold the pipeline in reset (registers are kept) |
-| Reset | `0xEE` | Reset the pipeline and clear the registers |
+## Limitations
 
-LED 0 shows that the processor is running, and LED 4 lights when the program has reached EBREAK.
+- Machine mode only; no compressed instructions, no PMP, no debug module.
+- Misaligned loads and stores trap (the ISA allows it); `rv32ui/ma_data`, which
+  expects them to succeed, is not run. Neither are the rv32mi tests that need
+  supervisor mode, PMP or debug triggers. The list and reasons are in
+  `scripts/build_isa.py`.
+- `mcycle` and `minstret` are read-only. WFI is a no-op.
+- JALR is predicted with the last target, so returns from a function with
+  several callers mispredict; there is no return address stack.
+- The data side has no cache: RAM is as fast as a cache would be, and data read
+  from flash pays the serial access each time.
 
-## Project Structure
+## Layout
 
 ```
-rtl/
-  riscv_core.sv     5-stage core: forwarding, hazard unit, branch/jump, counters
-  riscv_top.sv      iCEBreaker top: BRAMs, UART command FSM
-  memory.sv         Synchronous BRAM model (byte enables)
-  uart*.v           UART
-test/
-  tb_core.sv        Core + memories for simulation
-  test_riscv.py     Directed, timing, random and benchmark tests
-  test_top.py       Full-system UART test driving scripts/test_fpga.py
-  rv32i.py          Encoders + instruction-set reference model
-  programs.py       Benchmark programs
-  run_tests.py      cocotb runner (both builds, CPI summary)
-scripts/
-  test_fpga.py      Hardware test suite and interactive mode
-synth/icebreaker.pcf
+rtl/        riscv_core.sv  pipeline            icache.sv   I-cache, BTB, register file
+            csr.sv         CSRs, traps         muldiv.sv   M extension
+            memory.sv      SPRAM, boot ROM     spi_flash.sv  XIP flash reader
+            periph.sv      UART, timer, GPIO   soc.sv, icebreaker_top.sv
+firmware/   bootrom/  common/  monitor/  apps/  coremark/  isa/
+scripts/    rvhost.py (host library and CLI)   test_fpga.py (hardware suite)
+            mkimage.py  build_isa.py
+test/       test_core.py  test_isa.py  test_system.py  rv32i.py (reference model)
+synth/      build.sh  seeds.sh  netlist_sim.sh  icebreaker.pcf
 ```
 
 ## License
 
-MIT License
+MIT. CoreMark and riscv-tests are fetched at build time and keep their own
+licenses.
