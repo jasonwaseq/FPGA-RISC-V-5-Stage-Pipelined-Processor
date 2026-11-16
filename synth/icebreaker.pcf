@@ -1,18 +1,29 @@
-# iCEBreaker Pin Constraints (iCE40UP5K-SG48)
+# iCEBreaker v1.1a pin constraints (iCE40UP5K-SG48)
 
-# 12 MHz clock
-set_io clk  35
+# 12 MHz oscillator
+set_io CLK 35
 
-# Reset button (directly active-low to GPIO BTN_N)
-set_io rst_n 10
+# User button and LEDs on the main board (active low)
+set_io BTN_N  10
+set_io LEDR_N 11
+set_io LEDG_N 37
 
-# LEDs (accent LEDs on iCEBreaker)
-set_io led[0] 11
-set_io led[1] 37
-set_io led[2] 38  # Red
-set_io led[3] 39  # Green
-set_io led[4] 40  # Blue
+# UART through the FTDI bridge (channel B)
+set_io RX 6
+set_io TX 9
 
-# UART (directly to FTDI chip)
-set_io uart_rx 6
-set_io uart_tx 9
+# Configuration flash (W25Q128JV)
+set_io FLASH_SCK 15
+set_io FLASH_SSB 16
+set_io FLASH_IO0 14
+set_io FLASH_IO1 17
+
+# Break-off PMOD (PMOD2): five LEDs and three buttons
+set_io -nowarn LED1 26
+set_io -nowarn LED2 27
+set_io -nowarn LED3 25
+set_io -nowarn LED4 23
+set_io -nowarn LED5 21
+set_io -nowarn BTN1 20
+set_io -nowarn BTN2 19
+set_io -nowarn BTN3 18
