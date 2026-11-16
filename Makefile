@@ -31,6 +31,7 @@ help:
 	@echo "Hardware"
 	@echo "  make test-fpga      full hardware test suite over the UART"
 	@echo "  make test-coremark  CoreMark on the board"
+	@echo "  make interactive    assemble, run and single-step programs on the board"
 	@echo "  make term           reset the board and open the monitor shell"
 
 # ---- Simulation -----------------------------------------------------------------
@@ -77,12 +78,15 @@ seeds:
 	bash synth/seeds.sh 18
 
 # ---- Hardware -----------------------------------------------------------------------
-.PHONY: test-fpga test-coremark term
+.PHONY: test-fpga test-coremark interactive term
 test-fpga: firmware isa
 	$(PYTHON) scripts/test_fpga.py $(PORT)
 
 test-coremark: coremark
 	$(PYTHON) scripts/test_fpga.py $(PORT) -t loader --coremark
+
+interactive:
+	$(PYTHON) scripts/interactive.py $(PORT)
 
 term:
 	$(PYTHON) scripts/rvhost.py -p $(PORT) --term

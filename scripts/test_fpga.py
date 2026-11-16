@@ -8,6 +8,7 @@ read back and compared with a reference computed on the host.
     python3 scripts/test_fpga.py                 # full suite
     python3 scripts/test_fpga.py -t isa random   # selected groups
     python3 scripts/test_fpga.py --coremark      # add the 10+ second CoreMark run
+    python3 scripts/test_fpga.py -i              # interactive console instead of tests
 
 Groups
     loader   ROM protocol: ping, memory write / read-back / CRC over all of RAM
@@ -358,7 +359,14 @@ def main():
     ap.add_argument("-t", "--test", nargs="+", choices=list(GROUPS), help="groups to run")
     ap.add_argument("--coremark", action="store_true", help="also run CoreMark")
     ap.add_argument("--random", type=int, default=200, help="number of random programs")
+    ap.add_argument("-i", "--interactive", action="store_true",
+                    help="open the interactive console (scripts/interactive.py) instead")
     args = ap.parse_args()
+
+    if args.interactive:
+        import interactive
+        sys.argv = [sys.argv[0], args.port]
+        return interactive.main()
 
     board = Board(args.port)
     board.reset()

@@ -164,6 +164,32 @@ matmul         83889 cycles     67459 instrs  CPI 1.243  I-miss     8  mispredic
 
 Other commands: `md`, `mw`, `load`, `crc`, `go`, `perf`, `led`, `reboot`.
 
+**Interactive console** (`scripts/interactive.py`, `make interactive`). Type
+RISC-V assembly on the host and run it on the real core: the full RV32IM set
+with labels and pseudo-instructions, a dozen example programs, register and
+memory inspection (RAM, ROM, flash and peripherals), and true single-stepping
+on the hardware. A step plants a temporary EBREAK on each possible successor
+of the current instruction and resumes through a stub that restores all 31
+registers, so every instruction executes on the FPGA, not in a model.
+
+```
+rv32> example sum
+rv32> step 3
+  [02000] 06400513  li a0, 100
+        a0/x10 = 0x00000064  100
+  [02004] 00000593  li a1, 0
+  [02008] 00a585b3  add a1, a1, a0
+        a1/x11 = 0x00000064  100
+  next: [0200c] addi a0, a0, -1
+rv32> cont
+  Program finished.
+    a0/x10 = 0x00000000  0
+    a1/x11 = 0x000013ba  5050
+rv32> write 0x80002000 1          # red LED on
+rv32> exec firmware/build/hello.bin
+rv32> monitor                     # drop into the shell stored in flash
+```
+
 **C runtime** (`firmware/common`): start-up code, linker scripts for RAM and
 for execute-in-place, `printf`, interrupt entry, counters.
 
@@ -268,6 +294,7 @@ make build prog     # bitstream (18 MHz) -> board
 make flash-monitor  # monitor into SPI flash at 1 MB
 make test-fpga      # hardware suite
 make test-coremark
+make interactive    # assemble, run and single-step programs on the board
 make term           # monitor shell
 ```
 
@@ -296,6 +323,7 @@ rtl/        riscv_core.sv  pipeline            icache.sv   I-cache, BTB, registe
             periph.sv      UART, timer, GPIO   soc.sv, icebreaker_top.sv
 firmware/   bootrom/  common/  monitor/  apps/  coremark/  isa/
 scripts/    rvhost.py (host library and CLI)   test_fpga.py (hardware suite)
+            interactive.py (console)  rvasm.py (assembler / disassembler)
             mkimage.py  build_isa.py
 test/       test_core.py  test_isa.py  test_system.py  rv32i.py (reference model)
 synth/      build.sh  seeds.sh  netlist_sim.sh  icebreaker.pcf
