@@ -4,6 +4,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Prefer an OSS CAD Suite unpacked in the home directory over older system tools.
+if [ -d "$HOME/oss-cad-suite/bin" ]; then PATH="$HOME/oss-cad-suite/bin:$PATH"; fi
+
 RTL="rtl/riscv_core.sv rtl/icache.sv rtl/muldiv.sv rtl/csr.sv rtl/memory.sv \
      rtl/spi_flash.sv rtl/periph.sv rtl/soc.sv"
 CELLS=$(yosys-config --datdir)/ice40/cells_sim.v

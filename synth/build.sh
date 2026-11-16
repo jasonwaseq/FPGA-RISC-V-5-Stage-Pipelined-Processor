@@ -7,6 +7,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Prefer an OSS CAD Suite unpacked in the home directory over older system tools.
+if [ -d "$HOME/oss-cad-suite/bin" ]; then PATH="$HOME/oss-cad-suite/bin:$PATH"; fi
+
 DIVF=${1:-47}
 SEED=${2:-1}
 FREQ=$(python3 -c "print(12 * ($DIVF + 1) / 32)")

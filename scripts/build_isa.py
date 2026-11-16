@@ -46,7 +46,7 @@ def main():
         subprocess.run(["git", "-C", str(src), "submodule", "update", "--init", "--depth", "1",
                         "env"], check=True)
 
-    nm = args.cc.replace("gcc", "nm")
+    nm = args.cc[:-3] + "nm" if args.cc.endswith("gcc") else "nm"   # same prefix as the compiler
     manifest = {}
     for suite in SUITES:
         for path in sorted((src / "isa" / suite).glob("*.S")):

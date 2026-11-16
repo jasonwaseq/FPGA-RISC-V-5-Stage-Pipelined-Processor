@@ -6,6 +6,9 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+# Prefer an OSS CAD Suite unpacked in the home directory over older system tools.
+if [ -d "$HOME/oss-cad-suite/bin" ]; then PATH="$HOME/oss-cad-suite/bin:$PATH"; fi
+
 FREQ=${1:-18}
 shift || true
 SEEDS=${*:-1 2 3 4 5 6 7 8}

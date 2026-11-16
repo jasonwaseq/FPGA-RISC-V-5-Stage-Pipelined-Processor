@@ -5,9 +5,13 @@
 #   make isa        fetches riscv-tests on first use
 #
 # Needs a bare-metal RISC-V GCC with an rv32im multilib, e.g. the xPack
-# riscv-none-elf-gcc. Override RISCV= for a different prefix.
+# riscv-none-elf-gcc. It is taken from PATH, or from an xPack install unpacked
+# under ~/riscv-tools. Override RISCV= for a different prefix.
 
-RISCV   ?= riscv-none-elf-
+ifeq ($(shell command -v riscv-none-elf-gcc 2>/dev/null),)
+XPACK   := $(lastword $(sort $(wildcard $(HOME)/riscv-tools/xpack-riscv-none-elf-gcc-*/bin)))
+endif
+RISCV   ?= $(if $(XPACK),$(XPACK)/)riscv-none-elf-
 CC       = $(RISCV)gcc
 OBJCOPY  = $(RISCV)objcopy
 OBJDUMP  = $(RISCV)objdump
