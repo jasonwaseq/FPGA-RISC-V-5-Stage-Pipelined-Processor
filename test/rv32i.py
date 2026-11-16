@@ -1,8 +1,9 @@
-"""RV32I instruction encoders and an instruction-set reference model.
+"""RV32IM instruction encoders and an instruction-set reference model.
 
 The reference model is the golden model for the random tests: it executes a
-program one instruction at a time with no notion of a pipeline, so any
-difference from the RTL is a hazard, forwarding or decode bug.
+program one instruction at a time with no notion of a pipeline, caches or
+branch prediction, so any difference from the RTL is a hazard, forwarding,
+decode or memory-system bug.
 """
 
 MASK = 0xFFFF_FFFF
@@ -63,6 +64,15 @@ def SRA(rd, a, b):  return _r(0x20, b, a, 5, rd, OPR)
 def OR(rd, a, b):   return _r(0x00, b, a, 6, rd, OPR)
 def AND(rd, a, b):  return _r(0x00, b, a, 7, rd, OPR)
 
+def MUL(rd, a, b):    return _r(0x01, b, a, 0, rd, OPR)
+def MULH(rd, a, b):   return _r(0x01, b, a, 1, rd, OPR)
+def MULHSU(rd, a, b): return _r(0x01, b, a, 2, rd, OPR)
+def MULHU(rd, a, b):  return _r(0x01, b, a, 3, rd, OPR)
+def DIV(rd, a, b):    return _r(0x01, b, a, 4, rd, OPR)
+def DIVU(rd, a, b):   return _r(0x01, b, a, 5, rd, OPR)
+def REM(rd, a, b):    return _r(0x01, b, a, 6, rd, OPR)
+def REMU(rd, a, b):   return _r(0x01, b, a, 7, rd, OPR)
+
 def LB(rd, rs1, imm):  return _i(imm, rs1, 0, rd, 0b0000011)
 def LH(rd, rs1, imm):  return _i(imm, rs1, 1, rd, 0b0000011)
 def LW(rd, rs1, imm):  return _i(imm, rs1, 2, rd, 0b0000011)
@@ -87,7 +97,10 @@ def JALR(rd, rs1, imm): return _i(imm, rs1, 0, rd, 0b1100111)
 def NOP():    return ADDI(0, 0, 0)
 def EBREAK(): return 0x0010_0073
 
+def FENCE_I(): return 0x0000_100F
+
 ALU_RR = [ADD, SUB, SLL, SLT, SLTU, XOR, SRL, SRA, OR, AND]
+MULDIV = [MUL, MULH, MULHSU, MULHU, DIV, DIVU, REM, REMU]
 ALU_RI = [ADDI, SLTI, SLTIU, XORI, ORI, ANDI]
 SHIFT_I = [SLLI, SRLI, SRAI]
 BRANCHES = [BEQ, BNE, BLT, BGE, BLTU, BGEU]
@@ -115,21 +128,61 @@ def _s32(v):
     return _sx(v, 32)
 
 
-class ISS:
-    """Single-cycle RV32I instruction-set simulator (Harvard memories)."""
+def _muldiv(f3, a, b):
+    """M extension on 32-bit unsigned register values."""
+    sa, sb = _s32(a), _s32(b)
+    if f3 == 0:
+        return a * b
+    if f3 == 1:
+        return (sa * sb) >> 32
+    if f3 == 2:
+        return (sa * b) >> 32
+    if f3 == 3:
+        return (a * b) >> 32
+    if f3 == 4:                                 # DIV: round towards zero
+        if b == 0:
+            return MASK
+        if sa == -(1 << 31) and sb == -1:
+            return a
+        q = abs(sa) // abs(sb)
+        return q if (sa < 0) == (sb < 0) else -q
+    if f3 == 5:
+        return MASK if b == 0 else a // b
+    if f3 == 6:                                 # REM: sign of the dividend
+        if b == 0:
+            return a
+        if sa == -(1 << 31) and sb == -1:
+            return 0
+        return (abs(sa) % abs(sb)) * (-1 if sa < 0 else 1)
+    return a if b == 0 else a % b
 
-    def __init__(self, program, dmem_bytes=4096, dmem_init=None):
-        self.imem = list(program)
-        self.mem = bytearray(dmem_bytes)
+
+class ISS:
+    """Single-cycle RV32IM instruction-set simulator.
+
+    One flat little-endian memory holds code and data. `program` is placed at
+    `base`, which is also the reset PC. Execution stops at EBREAK / ECALL.
+    """
+
+    def __init__(self, program, base=0, mem_bytes=1 << 17, dmem_init=None):
+        self.mem = bytearray(mem_bytes)
+        self.base = base
+        for i, word in enumerate(program):
+            self.mem[base + 4 * i:base + 4 * i + 4] = (word & MASK).to_bytes(4, "little")
         if dmem_init:
             for addr, word in dmem_init.items():
                 self.mem[addr:addr + 4] = (word & MASK).to_bytes(4, "little")
         self.x = [0] * 32
-        self.pc = 0
+        self.pc = base
         self.retired = 0
 
     def load_word(self, addr):
         return int.from_bytes(self.mem[addr:addr + 4], "little")
+
+    def _check(self, addr, size):
+        """The core traps on these; the model refuses to run such a program."""
+        if addr % size or addr + size > len(self.mem):
+            raise ValueError(f"misaligned or out-of-range access at 0x{addr:08x}")
 
     def run(self, max_steps=100_000):
         for _ in range(max_steps):
@@ -138,8 +191,8 @@ class ISS:
         raise RuntimeError("reference model did not reach EBREAK")
 
     def step(self):
-        idx = self.pc >> 2
-        ins = self.imem[idx] if idx < len(self.imem) else 0
+        self._check(self.pc, 4)
+        ins = self.load_word(self.pc)
         op, rd = ins & 0x7F, (ins >> 7) & 31
         f3, rs1, rs2 = (ins >> 12) & 7, (ins >> 15) & 31, (ins >> 20) & 31
         f7 = ins >> 25
@@ -153,7 +206,6 @@ class ISS:
                     (((ins >> 20) & 1) << 11) | (((ins >> 21) & 0x3FF) << 1), 21)
         next_pc = (self.pc + 4) & MASK
         res = None
-        self.retired += 1
 
         if op == 0b0110111:
             res = imm_u
@@ -170,6 +222,7 @@ class ISS:
                 next_pc = (self.pc + imm_b) & MASK
         elif op == 0b0000011:
             addr = (a + imm_i) & MASK
+            self._check(addr, {0: 1, 1: 2, 2: 4, 4: 1, 5: 2}[f3])
             word = self.load_word(addr & ~3)
             sh = (addr & 3) * 8
             res = {0: _sx(word >> sh, 8) & MASK, 1: _sx(word >> sh, 16) & MASK,
@@ -177,7 +230,10 @@ class ISS:
         elif op == 0b0100011:
             addr = (a + imm_s) & MASK
             n = {0: 1, 1: 2, 2: 4}[f3]
+            self._check(addr, n)
             self.mem[addr:addr + n] = (b & ((1 << (8 * n)) - 1)).to_bytes(n, "little")
+        elif op == 0b0110011 and f7 == 1:
+            res = _muldiv(f3, a, b)
         elif op in (0b0010011, 0b0110011):
             rhs = imm_i & MASK if op == 0b0010011 else b
             sh = rhs & 31
@@ -199,10 +255,11 @@ class ISS:
             else:
                 res = a & rhs
         elif op == 0b1110011 and f3 == 0:
-            return True  # EBREAK / ECALL
+            return True  # EBREAK / ECALL: traps, does not retire
         else:
-            pass  # FENCE / unknown: NOP
+            pass  # FENCE / FENCE.I: no architectural effect
 
+        self.retired += 1
         if res is not None and rd != 0:
             self.x[rd] = res & MASK
         self.pc = next_pc

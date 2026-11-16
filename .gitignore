@@ -1,6 +1,6 @@
-# Simulation outputs
-build/sim_*/
-build/cpi_*.json
+# Build and simulation outputs
+build/
+firmware/build/
 results.xml
 *.vcd
 *.fst

@@ -1,131 +1,92 @@
-# RISC-V 5-Stage Pipelined Processor Makefile
+# RV32IM SoC for the iCEBreaker: simulation, firmware, bitstream, hardware tests.
+#
+# Tools: Yosys, nextpnr-ice40 and icestorm (OSS CAD Suite), Icarus Verilog and
+# cocotb for simulation, a RISC-V GCC (RISCV=prefix, default riscv-none-elf-)
+# for the firmware, pyserial for the host scripts.
 
-# Directories
-RTL_DIR    = rtl
-TEST_DIR   = test
-SYNTH_DIR  = synth
-BUILD_DIR  = build
+PORT     ?= /dev/ttyUSB1
+PLL_DIVF ?= 47          # system clock = 12 MHz * (PLL_DIVF + 1) / 32  -> 18 MHz
+SEED     ?= 2
+PYTHON   ?= python3
 
-# Source files
-RTL_FILES  = $(RTL_DIR)/riscv_core.sv \
-             $(RTL_DIR)/memory.sv \
-             $(RTL_DIR)/riscv_top.sv \
-             $(RTL_DIR)/uart.v \
-             $(RTL_DIR)/uart_tx.v \
-             $(RTL_DIR)/uart_rx.v
+RTL = rtl/riscv_core.sv rtl/icache.sv rtl/muldiv.sv rtl/csr.sv rtl/memory.sv \
+      rtl/spi_flash.sv rtl/periph.sv rtl/soc.sv
 
-# Top module
-TOP_MODULE = riscv_top
-
-# FPGA settings (iCEBreaker - iCE40UP5K)
-DEVICE     = up5k
-PACKAGE    = sg48
-PCF_FILE   = $(SYNTH_DIR)/icebreaker.pcf
-FREQ       = 12
-
-#-------------------------------------------------------------------------------
-# Simulation (cocotb + Icarus Verilog)
-#-------------------------------------------------------------------------------
-.PHONY: sim sim-fwd sim-top
-# Full suite on the forwarding and interlock-only builds + CPI comparison
-sim:
-	python3 $(TEST_DIR)/run_tests.py
-
-# Forwarding build only (faster)
-sim-fwd:
-	python3 $(TEST_DIR)/run_tests.py --forwarding 1
-
-# Full system: riscv_top over UART, driven by scripts/test_fpga.py (slow)
-sim-top:
-	python3 $(TEST_DIR)/run_tests.py --top
-
-#-------------------------------------------------------------------------------
-# Synthesis (Yosys + nextpnr for iCE40)
-#-------------------------------------------------------------------------------
-.PHONY: build synth place route prog
-
-# Synthesize to JSON
-$(BUILD_DIR)/$(TOP_MODULE).json: $(RTL_FILES)
-	@mkdir -p $(BUILD_DIR)
-	yosys -p "read_verilog -sv $(RTL_FILES); \
-	          synth_ice40 -top $(TOP_MODULE) -json $@"
-
-# Place and route
-$(BUILD_DIR)/$(TOP_MODULE).asc: $(BUILD_DIR)/$(TOP_MODULE).json $(PCF_FILE)
-	nextpnr-ice40 --$(DEVICE) --package $(PACKAGE) \
-		--json $(BUILD_DIR)/$(TOP_MODULE).json \
-		--pcf $(PCF_FILE) \
-		--asc $@ \
-		--freq $(FREQ)
-
-# Generate bitstream
-$(BUILD_DIR)/$(TOP_MODULE).bin: $(BUILD_DIR)/$(TOP_MODULE).asc
-	icepack $< $@
-
-synth: $(BUILD_DIR)/$(TOP_MODULE).json
-place: $(BUILD_DIR)/$(TOP_MODULE).asc
-build: $(BUILD_DIR)/$(TOP_MODULE).bin
-
-# Program FPGA
-prog: $(BUILD_DIR)/$(TOP_MODULE).bin
-	iceprog $<
-
-# Program to flash
-prog-flash: $(BUILD_DIR)/$(TOP_MODULE).bin
-	iceprog $<
-
-#-------------------------------------------------------------------------------
-# FPGA Testing
-#-------------------------------------------------------------------------------
-.PHONY: test-fpga
-test-fpga:
-	python3 scripts/test_fpga.py
-
-.PHONY: test-fpga-interactive
-test-fpga-interactive:
-	python3 scripts/test_fpga.py -i
-
-#-------------------------------------------------------------------------------
-# Linting
-#-------------------------------------------------------------------------------
-.PHONY: lint
-lint:
-	verilator --lint-only -Wall -sv $(RTL_FILES)
-
-#-------------------------------------------------------------------------------
-# Clean
-#-------------------------------------------------------------------------------
-.PHONY: clean
-clean:
-	rm -rf $(BUILD_DIR)/sim_* $(BUILD_DIR)/cpi_*.json
-	rm -f *.vcd *.fst
-	rm -rf __pycache__ $(TEST_DIR)/__pycache__
-	rm -rf sim_build results.xml $(TEST_DIR)/results.xml
-
-.PHONY: clean-all
-clean-all: clean
-	rm -rf .cocotb
-
-#-------------------------------------------------------------------------------
-# Help
-#-------------------------------------------------------------------------------
 .PHONY: help
 help:
-	@echo "RISC-V 5-Stage Pipelined Processor"
-	@echo ""
-	@echo "Simulation:"
-	@echo "  make sim              - Run cocotb suite (forwarding + interlock builds, CPI table)"
-	@echo "  make sim-fwd          - Run cocotb suite on the forwarding build only"
-	@echo "  make sim-top          - Run scripts/test_fpga.py against the simulated FPGA"
-	@echo ""
-	@echo "Synthesis:"
-	@echo "  make build            - Build bitstream for iCEBreaker"
-	@echo "  make prog             - Program FPGA"
-	@echo ""
-	@echo "Testing:"
-	@echo "  make test-fpga        - Run FPGA tests via UART"
-	@echo "  make test-fpga-interactive - Interactive FPGA testing"
-	@echo ""
-	@echo "Other:"
-	@echo "  make lint             - Lint RTL with Verilator"
-	@echo "  make clean            - Clean build artifacts"
+	@echo "Simulation"
+	@echo "  make sim            core suite on both builds (BTB / static) + CPI table"
+	@echo "  make sim-isa        official riscv-tests (rv32ui, rv32um, rv32mi)"
+	@echo "  make sim-system     boot ROM, UART loader, flash boot, monitor, interrupts"
+	@echo "  make sim-netlist    gate-level boot of the synthesised netlist"
+	@echo "  make lint           Verilator lint"
+	@echo "Firmware"
+	@echo "  make firmware       boot ROM, monitor, test programs"
+	@echo "  make isa coremark   riscv-tests and CoreMark (sources fetched on first use)"
+	@echo "FPGA"
+	@echo "  make build          synthesis, place and route -> build/soc.bin"
+	@echo "  make prog           program the bitstream"
+	@echo "  make flash-monitor  store the monitor in SPI flash (boots at power-up)"
+	@echo "  make seeds          place-and-route seed sweep (timing spread)"
+	@echo "Hardware"
+	@echo "  make test-fpga      full hardware test suite over the UART"
+	@echo "  make test-coremark  CoreMark on the board"
+	@echo "  make term           reset the board and open the monitor shell"
+
+# ---- Simulation -----------------------------------------------------------------
+.PHONY: sim sim-isa sim-system sim-netlist lint
+sim:
+	$(PYTHON) test/run_tests.py
+
+sim-isa: isa
+	$(PYTHON) test/run_tests.py --isa
+
+sim-system: firmware
+	$(PYTHON) test/run_tests.py --system
+
+sim-netlist:
+	bash synth/netlist_sim.sh
+
+lint:
+	verilator --lint-only -Wall -Wno-DECLFILENAME -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM \
+	    -Wno-PINCONNECTEMPTY -sv --top-module soc $(RTL)
+
+# ---- Firmware ---------------------------------------------------------------------
+.PHONY: firmware isa coremark
+firmware:
+	$(MAKE) -C firmware
+
+isa:
+	$(MAKE) -C firmware isa
+
+coremark:
+	$(MAKE) -C firmware coremark
+
+# ---- FPGA ---------------------------------------------------------------------------
+.PHONY: build prog flash-monitor seeds
+build:
+	bash synth/build.sh $(PLL_DIVF) $(SEED)
+
+prog:
+	iceprog build/soc.bin
+
+flash-monitor: firmware
+	iceprog -o 1M firmware/build/monitor.img
+
+seeds:
+	bash synth/seeds.sh 18
+
+# ---- Hardware -----------------------------------------------------------------------
+.PHONY: test-fpga test-coremark term
+test-fpga: firmware isa
+	$(PYTHON) scripts/test_fpga.py $(PORT)
+
+test-coremark: coremark
+	$(PYTHON) scripts/test_fpga.py $(PORT) -t loader --coremark
+
+term:
+	$(PYTHON) scripts/rvhost.py -p $(PORT) --term
+
+.PHONY: clean
+clean:
+	rm -rf build firmware/build test/__pycache__ scripts/__pycache__ test/results.xml
